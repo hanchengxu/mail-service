@@ -1,0 +1,38 @@
+# 收信任务配置：数组形式，按顺序依次执行
+#
+# 三种动作：
+#   read          读取某一封邮件的正文
+#   list_matches  列出命中的邮件摘要（只拉头部，快）
+#   list_folders  列出所有文件夹及邮件数
+#
+# 公共参数：
+#   name           任务名（可选，仅用于输出时区分）
+#   ignore         true 时跳过该任务（默认 false），用于临时停用某条而不必删除
+#   quiet          true 时不打印任务自身的输出（邮件正文等），只传给 actions
+#                  默认：挂了 actions 的任务自动 quiet，未挂 actions 的任务照常打印
+#   folder         文件夹名：INBOX / 其他文件夹/楽天証券 / 末级名楽天証券 / 中文别名收件箱
+#   read_status    unread=未读（默认）/ read=已读 / all=全部
+#   order          newest=最新在前（默认）/ oldest=最早在前
+#   title_contains 标题需包含的字符串（可选，忽略大小写）
+#
+# read 专属：nth（第几封，从 1 开始）、max_body_chars（正文最多打印多少字，可选）
+# list_matches 专属：limit（最多显示几条，默认 20）
+#
+# actions（可选，任意任务都能挂）：任务执行完后，把它的输出文本通过 stdin 交给这些脚本
+#   actions:
+#     - actions/rakuten-sec-action.py    # 路径相对本配置文件所在目录
+# 脚本从 stdin 读文本、结果打印到 stdout 即可。多个脚本会串联执行：
+# 上一个脚本的输出作为下一个脚本的输入（如：统计盈亏 -> 交给小爱音箱朗读）。
+
+- action: read
+  name: 読取楽天証券 投信基準価額メール
+  folder: 其他文件夹/楽天証券
+  title_contains: 投信基準価額メール
+  read_status: unread
+  nth: 1
+  order: newest
+  actions:
+    - actions/rakuten-sec-action.py   # 输出「今日盈亏」原始结论
+    - actions/rakuten-sec-speech.py   # 转成口语化文本（乐天专用）
+    - actions/xiaoai-voice-action.py  # 通用朗读：把文本交给 HA
+
