@@ -18,15 +18,21 @@ import io
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 import yaml
 
 from config import load_settings
 from imap_qq_test import SCOPE_NAMES, print_folders
+from logger import log, log_path
 from mail_client import QQMailClient
 
 DEFAULT_CONFIG = Path(__file__).with_name("tasks.yml")
+
+
+class NoMailFound(Exception):
+    """任务没读到任何邮件（不是错误，只是没有可处理的内容）。"""
 
 
 def _header(index: int, total: int, name: str) -> None:
@@ -49,7 +55,7 @@ def run_read(client: QQMailClient, cfg: dict) -> None:
             f"没有找到第 {cfg.get('nth', 1)} 封邮件"
             f"（文件夹 [{cfg['folder']}]{extra}，范围：{SCOPE_NAMES[cfg.get('read_status', 'unread')]}）"
         )
-        return
+        raise NoMailFound("没有匹配的邮件")
 
     print(f"UID     : {msg.uid}")
     print(f"主题    : {msg.subject}")
@@ -110,11 +116,14 @@ def run_post_actions(output: str, scripts, base_dir: Path) -> int:
     for script in scripts:
         path = resolve_script(str(script), base_dir)
         if not path.is_file():
-            print(f"\n[失败] 找不到 action 脚本：{path}")
+            msg = f"找不到 action 脚本：{path}"
+            print(f"\n[失败] {msg}，链路中断")
+            log(msg, "ERROR")
             failed += 1
-            continue
+            break
 
         print(f"\n---- 执行 action：{path.as_posix()} ----")
+        log(f"执行 action：{path.as_posix()}")
         try:
             result = subprocess.run(
                 [sys.executable, str(path)],
@@ -126,19 +135,29 @@ def run_post_actions(output: str, scripts, base_dir: Path) -> int:
                 env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
         except Exception as exc:
-            print(f"[失败] action {path.name} 无法执行：{type(exc).__name__}: {exc}")
+            msg = f"action {path.name} 无法执行：{type(exc).__name__}: {exc}"
+            print(f"[失败] {msg}")
+            log(f"{msg}\n{traceback.format_exc()}", "ERROR")
             failed += 1
-            continue
+            break
 
         if result.stdout:
             print(result.stdout.rstrip())
         if result.returncode != 0:
+            detail = result.stderr.strip() if result.stderr else f"退出码 {result.returncode}"
+            msg = f"action {path.name} 失败：{detail}"
+            print(f"[失败] {msg}")
+            log(msg, "ERROR")
             failed += 1
-            print(f"[失败] action {path.name} 退出码 {result.returncode}")
-            if result.stderr:
-                print(result.stderr.rstrip())
-        elif result.stdout.strip():
-            text = result.stdout  # 串联：交给下一个 action
+            break  # 失败即中断链路，后面的 action（如朗读）不再执行
+
+        if not result.stdout.strip():
+            msg = f"action {path.name} 没有输出，链路中断"
+            print(f"[中断] {msg}")
+            log(msg, "WARN")
+            break
+
+        text = result.stdout  # 串联：交给下一个 action
     return failed
 
 
@@ -175,26 +194,37 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit("配置文件内容必须是一个数组（以 - 开头的任务列表）")
 
     print(f"加载配置 {config_path}，共 {len(tasks)} 个任务")
+    log("=" * 60)
+    log(f"开始执行配置 {config_path}，共 {len(tasks)} 个任务")
     settings = load_settings()
 
     failed = 0
     skipped = 0
     with QQMailClient(settings) as client:
         print(f"已连接 {settings.host}:{settings.port}，账号 {settings.username}")
+        log(f"已连接 {settings.host}:{settings.port}，账号 {settings.username}")
         for i, cfg in enumerate(tasks, 1):
             if isinstance(cfg, dict) and cfg.get("ignore"):
                 skipped += 1
                 name = cfg.get("name") or cfg.get("action") or "未命名任务"
                 print(f"[跳过] {i}/{len(tasks)} {name}（ignore: true）")
+                log(f"跳过任务 {i}/{len(tasks)}：{name}（ignore: true）", "WARN")
                 continue
+
+            log(f"任务 {i}/{len(tasks)} 开始：{cfg.get('name') or cfg.get('action')}")
             # 捕获任务输出，便于后续传给 action 脚本
             buf = io.StringIO()
+            no_content = False
             try:
                 with contextlib.redirect_stdout(buf):
                     run_action(client, cfg, i, len(tasks))
+            except NoMailFound as exc:
+                log(f"任务 {i}/{len(tasks)} 无内容：{exc}", "WARN")
+                no_content = True
             except Exception as exc:
                 failed += 1
                 buf.write(f"[失败] 第 {i} 个任务：{type(exc).__name__}: {exc}\n")
+                log(f"任务 {i}/{len(tasks)} 失败：{exc}\n{traceback.format_exc()}", "ERROR")
             output = buf.getvalue()
 
             opts = cfg if isinstance(cfg, dict) else {}
@@ -208,22 +238,27 @@ def main(argv: list[str] | None = None) -> int:
             if quiet is None:
                 quiet = bool(scripts)
 
-            if quiet:
+            if quiet and not no_content:
                 print(f"（任务输出 {len(output)} 字已传给 action，未在控制台打印）")
             else:
                 sys.stdout.write(output)
 
-            if scripts:
+            if scripts and no_content:
+                print("[中断] 没有可读内容，跳过该任务的 actions（不朗读）")
+            elif scripts:
                 failed += run_post_actions(output, scripts, config_path.parent)
 
             if failed and args.stop_on_error:
                 break
 
-    print("\n" + "=" * 72)
-    print(
+    summary = (
         f"执行完成：共 {len(tasks)} 个任务，"
         f"执行 {len(tasks) - skipped - failed} 个，跳过 {skipped} 个，失败 {failed} 个"
     )
+    print("\n" + "=" * 72)
+    print(summary)
+    print(f"日志文件：{log_path()}")
+    log(summary, "ERROR" if failed else "INFO")
     return 1 if failed else 0
 
 

@@ -94,10 +94,14 @@ def reference_date(text: str) -> str:
     return f"{m.group(1)}月{m.group(2)}日" if m else ""
 
 
+class NoFundData(Exception):
+    """输入里没有可解析的基金数据。"""
+
+
 def report(text: str) -> str:
     funds = parse(text)
     if not funds:
-        return "未在输入文本中识别到「投信基準価額メール」的基金数据。"
+        raise NoFundData("未在输入文本中识别到「投信基準価額メール」的基金数据")
 
     # 前営業日比額求和 -> 今日盈亏（按每支基金各 1 万口换算）
     total_price = sum(f["price"] for f in funds)
@@ -143,7 +147,11 @@ def main(argv: list[str]) -> int:
     else:
         text = sys.stdin.read()
 
-    print(report(text))
+    try:
+        print(report(text))  # 正常结果走 stdout，供下一个 action 使用
+    except NoFundData as exc:
+        print(f"[无数据] {exc}", file=sys.stderr)  # 异常走 stderr，stdout 保持为空
+        return 1
     return 0
 
 

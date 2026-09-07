@@ -72,8 +72,10 @@ def main(argv: list[str]) -> int:
         text = sys.stdin.read()
 
     speech = to_speech(text)
-    if speech:
-        print(speech)
+    if not speech:
+        print("[无数据] 输入为空或转换后没有可朗读的内容", file=sys.stderr)
+        return 1
+    print(speech)
     return 0
 
 

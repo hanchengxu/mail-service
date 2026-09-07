@@ -104,7 +104,7 @@ def main(argv: list[str]) -> int:
 
     message = prepare_text(raw)
     if not message:
-        print("输入为空，没有可朗读的内容。")
+        print("输入为空，没有可朗读的内容。", file=sys.stderr)
         return 1
 
     service, payload = build_request(message)
