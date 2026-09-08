@@ -34,7 +34,6 @@
   nth: 1
   order: newest
   once_per_day: true    # 每 30 分钟轮询，但一天只播报一次（状态存在 state/once_per_day.json）
-  ignore: true
   actions:
     - actions/rakuten-sec-action.py   # 输出「今日盈亏」原始结论
     - actions/rakuten-sec-speech.py   # 转成口语化文本（乐天专用）
