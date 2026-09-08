@@ -1,0 +1,2 @@
+# 本项目仅依赖 PyYAML（tasks.yml 解析用），其余全部使用标准库
+PyYAML>=6.0

@@ -182,7 +182,9 @@ python run_tasks.py --stop-on-error    # 失败即停
 约定：
 
 - 脚本从 `stdin` 读文本，结果打印到 `stdout`；退出码非 0 记为失败。
+- **错误信息写 `stderr`**，正常结果写 `stdout`，不要把错误文案打到 stdout（否则会被下一个脚本当成内容继续处理）。
 - **多个脚本串联**：上一个脚本的输出作为下一个脚本的输入（统计 → 朗读）。
+- **链路中断**：任一脚本失败（非 0）或输出为空，后续脚本不再执行——所以解析失败时不会误触发朗读；任务本身没读到邮件时也会跳过 actions。
 - 路径相对**配置文件所在目录**（写绝对路径也行）。
 - 挂了 `actions` 的任务**默认不打印邮件正文**（只作为中间数据传给脚本），控制台只显示
   `（任务输出 N 字已传给 action，未在控制台打印）` 和脚本结果。
@@ -268,7 +270,92 @@ HA_DRY_RUN=1 python actions/xiaoai-voice-action.py message.txt
 
 想播报别的内容（如 amazon 到货通知），照这个样子写一个自己的 `xxx-speech.py` 插在通用朗读前面即可，朗读脚本不用改。
 
-## 7. 已知注意点
+## 7. 日志
+
+`run_tasks.py` 会把运行过程按天追加到 `logs/app-YYYYMMDD.log`（已在 `.gitignore` 忽略）：
+
+```
+[2026-09-07 22:33:44] INFO  已连接 imap.qq.com:993，账号 100873808@qq.com
+[2026-09-07 22:33:44] INFO  任务 1/1 开始：読取楽天証券 投信基準価額メール
+[2026-09-07 22:33:46] ERROR action rakuten-sec-action.py 失败：[无数据] 未在输入文本中识别到「投信基準価額メール」的基金数据
+[2026-09-07 22:33:47] ERROR 执行完成：共 1 个任务，执行 0 个，跳过 0 个，失败 1 个
+```
+
+记录内容：启动与配置、连接、每个任务的开始/跳过/失败（含堆栈）、每个 action 的执行与失败原因、结束汇总。
+模块 `logger.py` 提供 `log(message, level="INFO", echo=False)` 与 `log_path()`，其他脚本可直接复用。
+
+日志目录优先级：环境变量 `MAIL_LOG_DIR` → 项目 `logs/` → `~/.mail-service/logs/` → 系统临时目录
+（项目目录不可写时会自动回退，写失败会在 stderr 打印 `[warn] 写日志失败`，不再静默）。
+
+程序启动和结束时都会打印当前日志文件绝对路径；想单独确认：
+
+```bash
+cd /usr/mail-service
+python3 -c "from logger import log, log_path; log('测试'); print(log_path())"
+ls -l logs/
+```
+
+## 8. 部署到 Ubuntu 与定时执行
+
+安装依赖（只要 PyYAML）并建立 `.env`：
+
+```bash
+cd /usr/mail-service
+pip3 install -r requirements.txt          # 或 apt install -y python3-yaml
+cp .env.example .env && vi .env           # .env 不进 git，服务器上要自己建
+python3 run_tasks.py --stop-on-error      # 先手动跑一次
+```
+
+时区（cron 按服务器时区触发）：
+
+```bash
+timedatectl                                 # 云主机常默认 UTC！
+sudo timedatectl set-timezone Asia/Shanghai # 建议东八区
+```
+
+crontab（**`cd` 不能少**，这是最常踩的坑）：
+
+```cron
+MAILTO=""
+# 周一至周五 10:00~13:30 每 30 分钟轮询（邮件一般 11:30~12:15 JST 到达）
+*/30 10-13 * * 1-5 cd /usr/mail-service && mkdir -p logs && /usr/bin/python3 run_tasks.py --stop-on-error >> logs/cron.out 2>&1
+
+# 想全天候每 30 分钟：*/30 * * * *
+# 想一天只跑一次：    0 12 * * 1-5   （北京 12:00 = 日本 13:00；UTC 时区要写 0 4）
+```
+
+- 用 `which python3` 确认绝对路径；虚拟环境写 `venv/bin/python`。
+- `mkdir -p logs` 不能省（shell 重定向早于 Python 启动）。
+- `MAILTO=""` 避免 cron 尝试发邮件报 MTA 错误。
+- 排查：`grep CRON /var/log/syslog | tail`、`journalctl -u cron --since today`；先把频率改成 `* * * * *` 验证触发。
+
+### 高频轮询必须配 `once_per_day`
+
+程序只读、不标记已读，所以每跑一次都会读到同一封并重复播报。任务加 `once_per_day: true` 后：
+
+- 只在**读到内容且没失败**时记录当天已完成（存 `state/once_per_day.json`）；
+- 当天后续运行直接跳过（打印 `[跳过] … 今天已成功执行过`）；
+- 邮件晚到时不会误记录，会继续轮询直到成功；
+- 手动强制执行：`python3 run_tasks.py --force`。
+
+```yaml
+- action: read
+  name: 読取楽天証券 投信基準価額メール
+  folder: 其他文件夹/楽天証券
+  title_contains: 投信基準価額メール
+  read_status: all
+  nth: 1
+  once_per_day: true
+  actions:
+    - actions/rakuten-sec-action.py
+    - actions/rakuten-sec-speech.py
+    - actions/xiaoai-voice-action.py
+```
+
+时区与邮件时间：程序排序用邮件 `Date` 头（発件方的 JST，+0900），与服务器时区无关；
+QQ 邮箱网页版显示北京时间，比邮件里写的 JST 早 1 小时；中日均无夏令时。
+
+## 9. 已知注意点
 
 - **不按 UID 判断新旧**：移动过文件夹的邮件 UID 保留原值，与时间不一致。排序统一按邮件 `Date` 头。
 - **标题过滤在本地做**：QQ 的 IMAP SEARCH 对非 ASCII 关键字支持不佳，所以先取 UID 再分块拉头部过滤。

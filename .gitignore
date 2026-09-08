@@ -3,8 +3,9 @@
 .env.*
 !.env.example
 
-# 运行日志
+# 运行日志与运行状态（每天只跑一次的去重记录）
 logs/
+state/
 
 # Python
 __pycache__/

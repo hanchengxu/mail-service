@@ -8,6 +8,8 @@
 # 公共参数：
 #   name           任务名（可选，仅用于输出时区分）
 #   ignore         true 时跳过该任务（默认 false），用于临时停用某条而不必删除
+#   once_per_day   true 时该任务每天只成功执行一次（配合高频 cron 防重复播报）
+#                  只在「读到内容且没失败」时记录，邮件晚到会继续轮询；--force 可强制执行
 #   quiet          true 时不打印任务自身的输出（邮件正文等），只传给 actions
 #                  默认：挂了 actions 的任务自动 quiet，未挂 actions 的任务照常打印
 #   folder         文件夹名：INBOX / 其他文件夹/楽天証券 / 末级名楽天証券 / 中文别名收件箱
@@ -28,9 +30,10 @@
   name: 読取楽天証券 投信基準価額メール
   folder: 其他文件夹/楽天証券
   title_contains: 投信基準価額メール
-  read_status: unread
+  read_status: all
   nth: 1
   order: newest
+  once_per_day: true    # 每 30 分钟轮询，但一天只播报一次（状态存在 state/once_per_day.json）
   actions:
     - actions/rakuten-sec-action.py   # 输出「今日盈亏」原始结论
     - actions/rakuten-sec-speech.py   # 转成口语化文本（乐天专用）

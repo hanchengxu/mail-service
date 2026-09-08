@@ -15,13 +15,22 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # 服务器上常见：只拷了代码没装依赖
+    sys.exit(
+        "缺少依赖 PyYAML。请先安装：\n"
+        "  pip install -r requirements.txt\n"
+        "  或 pip install pyyaml   /   apt install python3-yaml"
+    )
 
 from config import load_settings
 from imap_qq_test import SCOPE_NAMES, print_folders
@@ -29,6 +38,42 @@ from logger import log, log_path
 from mail_client import QQMailClient
 
 DEFAULT_CONFIG = Path(__file__).with_name("tasks.yml")
+STATE_DIR = Path(__file__).with_name("state")
+
+
+# ---------------- once_per_day：每天只成功执行一次 ----------------
+def _state_file() -> Path:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return STATE_DIR / "once_per_day.json"
+
+
+def _load_state() -> dict:
+    path = _state_file()
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def already_run_today(key: str) -> bool:
+    return _load_state().get(key) == datetime.now().strftime("%Y-%m-%d")
+
+
+def mark_run_today(key: str) -> None:
+    today = datetime.now().strftime("%Y-%m-%d")
+    state = {k: v for k, v in _load_state().items() if v == today}
+    state[key] = today
+    try:
+        _state_file().write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        log(f"写入 once_per_day 状态失败：{exc}", "WARN")
 
 
 class NoMailFound(Exception):
@@ -183,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按 YAML 配置批量执行收信任务")
     parser.add_argument("config", nargs="?", default=str(DEFAULT_CONFIG), help="YAML 配置文件路径")
     parser.add_argument("--stop-on-error", action="store_true", help="遇到失败立即停止")
+    parser.add_argument(
+        "--force", action="store_true", help="忽略 once_per_day，强制执行一次"
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
@@ -211,7 +259,18 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"跳过任务 {i}/{len(tasks)}：{name}（ignore: true）", "WARN")
                 continue
 
-            log(f"任务 {i}/{len(tasks)} 开始：{cfg.get('name') or cfg.get('action')}")
+            opts = cfg if isinstance(cfg, dict) else {}
+            task_key = str(opts.get("name") or opts.get("action") or i)
+
+            # once_per_day：今天已经成功跑过就跳过，避免高频定时重复播报
+            if opts.get("once_per_day") and not args.force and already_run_today(task_key):
+                skipped += 1
+                print(f"[跳过] {i}/{len(tasks)} {task_key}（once_per_day：今天已成功执行过）")
+                log(f"跳过任务 {i}/{len(tasks)}：{task_key}（今天已执行）", "WARN")
+                continue
+
+            log(f"任务 {i}/{len(tasks)} 开始：{task_key}")
+            failed_before = failed
             # 捕获任务输出，便于后续传给 action 脚本
             buf = io.StringIO()
             no_content = False
@@ -227,7 +286,6 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"任务 {i}/{len(tasks)} 失败：{exc}\n{traceback.format_exc()}", "ERROR")
             output = buf.getvalue()
 
-            opts = cfg if isinstance(cfg, dict) else {}
             scripts = opts.get("actions")
             if isinstance(scripts, str):
                 scripts = [scripts]
@@ -247,6 +305,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("[中断] 没有可读内容，跳过该任务的 actions（不朗读）")
             elif scripts:
                 failed += run_post_actions(output, scripts, config_path.parent)
+
+            # 只在「有内容且没失败」时记一次，保证邮件晚到时还会继续轮询
+            if opts.get("once_per_day") and not no_content and failed == failed_before:
+                mark_run_today(task_key)
+                log(f"记录 once_per_day 完成：{task_key}")
 
             if failed and args.stop_on_error:
                 break
