@@ -131,13 +131,24 @@ class QQMailClient:
             )
         raise ValueError(f"找不到文件夹：{name}")
 
-    def _select(self, folder: Folder) -> int:
+    def _select(self, folder: Folder, readonly: bool = True) -> int:
+        """打开文件夹。默认只读（EXAMINE，不会置 \\Seen）；写操作需 readonly=False。"""
         if not folder.selectable:
             raise ValueError(f"文件夹 '{folder.name}' 不可选择（\\NoSelect）")
-        typ, data = self.conn.select(f'"{folder.raw}"', readonly=True)
+        typ, data = self.conn.select(f'"{folder.raw}"', readonly=readonly)
         if typ != "OK":
             raise RuntimeError(f"打开文件夹 '{folder.name}' 失败：{typ} {data}")
         return int(data[0]) if data and data[0] else 0
+
+    def set_seen(self, folder_name: str, uid: str, seen: bool = True) -> bool:
+        """设置邮件已读/未读（唯一会修改邮箱状态的操作）。"""
+        folder = self.resolve_folder(folder_name)
+        self._select(folder, readonly=False)
+        action = "+FLAGS" if seen else "-FLAGS"
+        typ, data = self.conn.uid("STORE", uid, action, "(\\Seen)")
+        if typ != "OK":
+            raise RuntimeError(f"设置 UID={uid} 已读状态失败：{typ} {data}")
+        return True
 
     # ---------------- 检索 / 读取 ----------------
     def search(

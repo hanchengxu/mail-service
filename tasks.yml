@@ -34,8 +34,20 @@
   nth: 1
   order: newest
   once_per_day: true    # 每 30 分钟轮询，但一天只播报一次（状态存在 state/once_per_day.json）
+  ignore: true
   actions:
     - actions/rakuten-sec-action.py   # 输出「今日盈亏」原始结论
     - actions/rakuten-sec-speech.py   # 转成口语化文本（乐天专用）
     - actions/xiaoai-voice-action.py  # 通用朗读：把文本交给 HA
 
+- action: read
+  name: amazon 配達中
+  folder: 其他文件夹/amazon
+  title_contains: 配達中
+  read_status: unread
+  nth: 1
+  order: newest
+  actions:
+    - actions/amazon/amazon-send-action.py  # 生成「X月X日，有亚马逊快递正在发送」
+    - actions/xiaoai-voice-action.py        # 通用朗读：交给 HA
+    - actions/mark-read-action.py           # 朗读成功后才标记已读；失败则保留未读下轮重试

@@ -270,6 +270,47 @@ HA_DRY_RUN=1 python actions/xiaoai-voice-action.py message.txt
 
 想播报别的内容（如 amazon 到货通知），照这个样子写一个自己的 `xxx-speech.py` 插在通用朗读前面即可，朗读脚本不用改。
 
+### 内置 action：`actions/mark-read-action.py`（通用：标记已读）
+
+把上游邮件标记为已读（目前项目里**唯一会修改邮箱状态**的操作）。建议放在链路**最后**——只有解析、朗读都成功后才标记；万一朗读失败，邮件保持未读，下轮轮询会再试一次。
+
+```yaml
+  actions:
+    - actions/amazon/amazon-send-action.py
+    - actions/xiaoai-voice-action.py
+    - actions/mark-read-action.py      # 最后标记
+```
+
+- 需要 `UID` 和 `文件夹`：stdin 里没有时，会回退读取 `MAIL_TASK_OUTPUT` 指向的文件
+  （`run_tasks.py` 自动把任务原始输出写到临时文件并通过环境变量传给每个 action，用完即删）。
+- `MARK_AS=unread` 可反向标记成未读（补救用）；`HA_DRY_RUN=1` 时只打印不执行。
+- 配合 `read_status: unread` 就是「未读队列」模式：处理一封、标记一封，天然不会重复播报，
+  此时无需再配 `once_per_day`（同一天多个包裹也都能播报）。
+
+### 内置 action：`actions/amazon/amazon-send-action.py`（amazon 配送通知）
+
+不解析正文，只要文本里出现「配達中」就输出固定文案，日期取邮件时间（换算成日本时间 JST）：
+
+```
+输入：时间    : Sun, 06 Sep 2026 23:31:35 +0000   （+ 标题含「配達中」）
+输出：9月7日，有亚马逊快递正在发送
+```
+
+文本里没有「配達中」时写 stderr 并返回 1，链路中断、不会朗读。串联：
+
+```yaml
+- action: read
+  name: amazon 配達中
+  folder: 其他文件夹/amazon
+  title_contains: 配達中
+  read_status: all
+  nth: 1
+  once_per_day: true
+  actions:
+    - actions/amazon/amazon-send-action.py
+    - actions/xiaoai-voice-action.py
+```
+
 ## 7. 日志
 
 `run_tasks.py` 会把运行过程按天追加到 `logs/app-YYYYMMDD.log`（已在 `.gitignore` 忽略）：

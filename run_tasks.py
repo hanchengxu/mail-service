@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +104,7 @@ def run_read(client: QQMailClient, cfg: dict) -> None:
         raise NoMailFound("没有匹配的邮件")
 
     print(f"UID     : {msg.uid}")
+    print(f"文件夹  : {cfg['folder']}")
     print(f"主题    : {msg.subject}")
     print(f"发件人  : {msg.sender}")
     print(f"时间    : {msg.date}")
@@ -304,7 +306,18 @@ def main(argv: list[str] | None = None) -> int:
             if scripts and no_content:
                 print("[中断] 没有可读内容，跳过该任务的 actions（不朗读）")
             elif scripts:
-                failed += run_post_actions(output, scripts, config_path.parent)
+                # 把任务原始输出存成临时文件，供 mark-read 这类需要 UID 的 action 回退读取
+                task_output_file = Path(tempfile.gettempdir()) / f"mail-task-{os.getpid()}.txt"
+                try:
+                    task_output_file.write_text(output, encoding="utf-8")
+                    os.environ["MAIL_TASK_OUTPUT"] = str(task_output_file)
+                except OSError as exc:
+                    log(f"写入任务输出临时文件失败：{exc}", "WARN")
+                try:
+                    failed += run_post_actions(output, scripts, config_path.parent)
+                finally:
+                    os.environ.pop("MAIL_TASK_OUTPUT", None)
+                    task_output_file.unlink(missing_ok=True)
 
             # 只在「有内容且没失败」时记一次，保证邮件晚到时还会继续轮询
             if opts.get("once_per_day") and not no_content and failed == failed_before:
