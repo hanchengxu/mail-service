@@ -30,14 +30,14 @@
   name: 読取楽天証券 投信基準価額メール
   folder: 其他文件夹/楽天証券
   title_contains: 投信基準価額メール
-  read_status: all
+  read_status: unread
   nth: 1
   order: newest
-  once_per_day: true    # 每 30 分钟轮询，但一天只播报一次（状态存在 state/once_per_day.json）
   actions:
     - actions/rakuten-sec-action.py   # 输出「今日盈亏」原始结论
     - actions/rakuten-sec-speech.py   # 转成口语化文本（乐天专用）
     - actions/xiaoai-voice-action.py  # 通用朗读：把文本交给 HA
+    - actions/mark-read-action.py     # 朗读成功后才标记已读；失败则保留未读下轮重试
 
 - action: read
   name: amazon 配達中
