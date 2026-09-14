@@ -8,6 +8,12 @@
 配置格式见 tasks.yml：一个数组，每个元素是一个动作。
 任意任务加 ignore: true 即可跳过（临时停用，不用删除该条）。
 任意任务加 actions: [脚本路径] 可把该任务的输出文本通过 stdin 交给脚本二次处理。
+
+四种动作：
+    read          读取某一封邮件的正文
+    list_matches  列出命中的邮件摘要（只拉头部，快）
+    list_folders  列出所有文件夹及邮件数
+    fetch_eml     批量把邮件另存为 .eml 文件（供离线解析脚本使用，见 tasks.yml 的 times 任务）
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -138,10 +145,62 @@ def run_list_folders(client: QQMailClient, cfg: dict) -> None:
     print_folders(client)
 
 
+def run_fetch_eml(client: QQMailClient, cfg: dict) -> None:
+    """批量把符合条件的邮件另存为 .eml 文件，供离线解析脚本（如 timesCar）使用。
+
+    与 read 的区别：read 取单封、只给正文；fetch_eml 批量取、保留整封原始字节
+    （编码与结构完整），落盘后交给专门的解析脚本处理。
+
+    文件名用 UID，同一封邮件重复拉取不会重复落盘；已存在的默认跳过（增量同步），
+    需要强制重下可设 overwrite: true。
+    """
+    matches = client.search(
+        folder_name=cfg["folder"],
+        read_status=cfg.get("read_status", "all"),
+        title_contains=cfg.get("title_contains"),
+        order=cfg.get("order", "newest"),
+        limit=cfg.get("limit"),
+    )
+    if not matches:
+        print("没有符合条件的邮件")
+        return
+
+    out_dir = Path(cfg["out_dir"])
+    if not out_dir.is_absolute():
+        out_dir = DEFAULT_CONFIG.parent / out_dir
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"无法创建输出目录 {out_dir}：{exc}") from exc
+
+    overwrite = bool(cfg.get("overwrite"))
+    uids = [m.uid for m in matches]
+    todo = [u for u in uids if overwrite or not (out_dir / f"{u}.eml").is_file()]
+
+    print(f"命中 {len(matches)} 封，待下载 {len(todo)} 封（已存在 {len(uids) - len(todo)} 封）")
+    print(f"输出目录：{out_dir}")
+    print(f"文件夹  : {cfg['folder']}")
+
+    ok = failed = 0
+    for uid, raw in client.fetch_raws(cfg["folder"], todo):
+        try:
+            (out_dir / f"{uid}.eml").write_bytes(raw)
+            ok += 1
+        except OSError as exc:
+            failed += 1
+            print(f"  [跳过] UID={uid} 写入失败：{exc}")
+
+    summary = f"已保存 {ok} 封 .eml"
+    if failed:
+        summary += f"，失败 {failed} 封"
+    print(summary)
+
+
 ACTIONS = {
     "read": (run_read, {"folder"}),
     "list_matches": (run_list_matches, {"folder"}),
     "list_folders": (run_list_folders, set()),
+    "fetch_eml": (run_fetch_eml, {"folder", "out_dir"}),
 }
 
 
@@ -161,7 +220,14 @@ def run_post_actions(output: str, scripts, base_dir: Path) -> int:
     failed = 0
     text = output
     for script in scripts:
-        path = resolve_script(str(script), base_dir)
+        # 支持「脚本路径 + 参数」写法，如：
+        #   - actions/timesCar/deploy.py --dest /usr/local/nginx/html/timescar
+        # 只有含空格时才 split，避免把纯路径里的分隔符误当转义处理
+        raw = str(script)
+        parts = shlex.split(raw) if " " in raw else [raw]
+        path = resolve_script(parts[0], base_dir)
+        extra_args = parts[1:]
+
         if not path.is_file():
             msg = f"找不到 action 脚本：{path}"
             print(f"\n[失败] {msg}，链路中断")
@@ -169,11 +235,12 @@ def run_post_actions(output: str, scripts, base_dir: Path) -> int:
             failed += 1
             break
 
-        print(f"\n---- 执行 action：{path.as_posix()} ----")
-        log(f"执行 action：{path.as_posix()}")
+        shown = " ".join([path.as_posix(), *extra_args]).strip()
+        print(f"\n---- 执行 action：{shown} ----")
+        log(f"执行 action：{shown}")
         try:
             result = subprocess.run(
-                [sys.executable, str(path)],
+                [sys.executable, str(path), *extra_args],
                 input=text,
                 capture_output=True,
                 text=True,

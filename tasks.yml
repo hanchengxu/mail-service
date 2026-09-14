@@ -50,3 +50,34 @@
     - actions/amazon/amazon-send-action.py  # 生成「X月X日，有亚马逊快递正在发送」
     - actions/xiaoai-voice-action.py        # 通用朗读：交给 HA
     - actions/mark-read-action.py           # 朗读成功后才标记已读；失败则保留未读下轮重试
+
+# ---------------- Times CAR 用车数据 ----------------
+# 这一条是「文件型」任务：actions 里的脚本不读 stdin，而是读写 timesCar 目录下的文件。
+#
+#   data/snapshot.md  ← 唯一数据源（历史已固化在这里，mail/ 与 site/ 的原始数据已删除）
+#        ↑
+#   ingest.py（把 mail/*.eml、site/*.csv 并入快照，并入后删掉原始文件）
+#        ↑
+#   fetch_eml（IMAP 拉取新邮件到 mail/）
+#
+#   snapshot.md -> parse_mail.py -> formMail.md -> build_web.py -> web/index.html -> deploy
+#
+# 全链路幂等：UID 落盘去重 + 快照按 予約番号 后覆盖前，重复跑结果一致。
+- action: fetch_eml
+  name: times 用车数据同步
+  folder: 其他文件夹/times
+  # 同时覆盖两类邮件，缺一不可：
+  #   【Times CAR】返却証       -> 実績（利用時間/走行距離/合計金額 + 驾驶行为）
+  #   【Times CAR】予約登録完了 -> 预约信息（予約番号/ステーション/車両）
+  title_contains: Times CAR
+  read_status: all
+  out_dir: actions/timesCar/mail      # 相对本配置文件所在目录；ingest 并入后会自动清空
+  # overwrite: true                   # 需要强制重下已存在的邮件时打开
+  # once_per_day: true                # 想一天只同步一次可加（IMAP 全量拉，开销不大）
+  actions:
+    - actions/timesCar/ingest.py      # mail/*.eml + site/*.csv -> data/snapshot.md（并入后删原件）
+    - actions/timesCar/parse_mail.py  # 快照整合 -> formMail.md
+    - actions/timesCar/build_web.py   # formMail.md -> web/index.html
+    # 整个 web/ 目录拷到 nginx 站点目录并覆盖（index.html 用相对路径引用 car/ 和 logos/，
+    # 所以不能只拷 index.html）。本机不是服务器时会自动跳过，加 --strict 可改成报错。
+    - actions/timesCar/deploy.py --dest /usr/local/nginx/html/timescar

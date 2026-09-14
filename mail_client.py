@@ -14,6 +14,8 @@ from imap_utf7 import imap_utf7_decode, imap_utf7_encode
 
 HEADER_FIELDS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])"
 CHUNK_SIZE = 50
+# 整封邮件体积远大于头部，批量 FETCH 时块要小一些，避免单次响应过大
+RAW_CHUNK_SIZE = 20
 
 # 读取范围 -> IMAP SEARCH 条件
 READ_STATUS = {"unread": "UNSEEN", "read": "SEEN", "all": "ALL"}
@@ -194,6 +196,30 @@ class QQMailClient:
         if typ != "OK" or not data or not isinstance(data[0], tuple):
             raise RuntimeError(f"读取邮件 UID={uid} 失败：{typ} {data}")
         return parse_message(data[0][1], uid=uid)
+
+    def fetch_raws(self, folder_name: str, uids: Iterable[str]) -> Iterator[tuple[str, bytes]]:
+        """批量取整封邮件的**原始字节**（用于另存为 .eml）。
+
+        与 fetch() 的区别：不做解析，原样返回 RFC822 字节，
+        编码（如 ISO-2022-JP + quoted-printable）与附件结构完整保留。
+
+        :return: 依次产出 (uid, 原始字节)
+        """
+        folder = self.resolve_folder(folder_name)
+        self._select(folder)  # 只打开一次文件夹，避免逐封重复 SELECT
+        for chunk in _chunks(list(uids), RAW_CHUNK_SIZE):
+            if not chunk:
+                continue
+            typ, data = self.conn.uid("FETCH", ",".join(chunk), "(RFC822)")
+            if typ != "OK":
+                raise RuntimeError(f"批量 FETCH 失败：{typ} {data}")
+            for item in data or []:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                match = re.search(rb"UID (\d+)", item[0])
+                if not match:
+                    continue
+                yield match.group(1).decode(), item[1]
 
     def read_message(
         self,

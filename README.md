@@ -81,6 +81,7 @@ with QQMailClient(load_settings()) as client:
 | `resolve_folder(name) -> Folder` | 支持 `INBOX`、完整路径 `其他文件夹/楽天証券`、末级名 `楽天証券`、中文别名 `收件箱` |
 | `search(folder, read_status, title_contains, order, limit) -> list[MailSummary]` | 只拉头部，返回摘要列表 |
 | `fetch(folder, uid) -> MailMessage` | 按 UID 取整封并解析 |
+| `fetch_raws(folder, uids) -> Iterator[(uid, bytes)]` | **批量取整封的原始字节**（不解析，用于另存 `.eml`）；只 SELECT 一次、分块 20 封拉取 |
 | `read_message(folder, title_contains, nth, read_status, order) -> MailMessage \| None` | **核心**：第 N 封邮件的正文 |
 | `message_count(folder) -> (总数, 未读数)` | 用于目录列表 |
 
@@ -127,7 +128,7 @@ python run_tasks.py my_tasks.yml       # 指定配置
 python run_tasks.py --stop-on-error    # 失败即停
 ```
 
-三种动作：
+四种动作：
 
 ```yaml
 - action: read            # 读取某一封正文
@@ -148,9 +149,30 @@ python run_tasks.py --stop-on-error    # 失败即停
 
 - action: list_folders    # 列出所有文件夹
   name: 列出所有文件夹
+
+- action: fetch_eml       # 批量把邮件另存为 .eml 文件
+  name: times 用车数据同步
+  folder: 其他文件夹/times
+  title_contains: Times CAR
+  read_status: all
+  out_dir: actions/timesCar/mail   # 相对配置文件所在目录，写绝对路径也行
+  # limit: 500                     # 可选，不填=全部
+  # overwrite: true                # 可选，强制重下已存在的邮件
+  actions:
+    - actions/timesCar/parse_mail.py
+    - actions/timesCar/build_web.py
 ```
 
-`read` 与 `list_matches` 必填 `folder`；其他字段都有默认值。单个任务出错会打印 `[失败]` 并继续下一个，最后汇总失败数。
+`read` / `list_matches` 必填 `folder`，`fetch_eml` 必填 `folder` + `out_dir`；其他字段都有默认值。单个任务出错会打印 `[失败]` 并继续下一个，最后汇总失败数。
+
+### `fetch_eml`：批量导出 `.eml`
+
+给「需要整批邮件、且要保留原始编码/结构」的离线解析脚本用（典型就是 `timesCar`）。
+与 `read` 的区别：`read` 取单封、只给正文；`fetch_eml` 批量取、落盘整封原始字节。
+
+- 文件名用 **UID**（`{uid}.eml`），同一封重复拉取不会重复落盘；**已存在默认跳过**（增量同步）
+- 想强制重下加 `overwrite: true`
+- 属于**只读**操作，不会标记邮件已读
 
 任意任务加 `ignore: true` 即可跳过（临时停用，不必删除该条）：
 
@@ -182,6 +204,9 @@ python run_tasks.py --stop-on-error    # 失败即停
 约定：
 
 - 脚本从 `stdin` 读文本，结果打印到 `stdout`；退出码非 0 记为失败。
+- **脚本可以带参数**：直接写在脚本路径后面，如
+  `- actions/timesCar/deploy.py --dest /usr/local/nginx/html/timescar`（含空格时按 shell 规则切分）。
+  路径请统一用 `/`，不要用 `\`（反斜杠会被当成转义处理）。
 - **错误信息写 `stderr`**，正常结果写 `stdout`，不要把错误文案打到 stdout（否则会被下一个脚本当成内容继续处理）。
 - **多个脚本串联**：上一个脚本的输出作为下一个脚本的输入（统计 → 朗读）。
 - **链路中断**：任一脚本失败（非 0）或输出为空，后续脚本不再执行——所以解析失败时不会误触发朗读；任务本身没读到邮件时也会跳过 actions。
@@ -310,6 +335,63 @@ HA_DRY_RUN=1 python actions/xiaoai-voice-action.py message.txt
     - actions/amazon/amazon-send-action.py
     - actions/xiaoai-voice-action.py
 ```
+
+### 内置 action：`actions/timesCar/`（Times CAR 用车数据看板）
+
+与其它 action 不同，这一组是**文件型**脚本：不读 stdin，而是读写 `timesCar` 目录下的文件。
+
+```
+fetch_eml（从 IMAP 批量拉 .eml）
+   └─> mail/*.eml + site/*.csv
+         └─> parse_mail.py ──> formMail.md
+               └─> build_web.py ──> web/index.html（单文件看板，双击即开）
+                     └─> deploy.py ──> 拷到 nginx 站点目录（覆盖）
+```
+
+| 脚本 | 输入 | 输出 |
+|---|---|---|
+| `parse_mail.py` | `mail/*.eml`（返却証 + 予約登録/変更完了）、`site/*.csv`（官网导出的利用明细） | `formMail.md`（9 列主表） |
+| `build_web.py` | `formMail.md` | `web/index.html` |
+| `deploy.py` | `web/` 整个目录 | 拷到 nginx 站点目录（默认 `/usr/local/nginx/html/timescar`） |
+
+#### `deploy.py`：部署到 nginx
+
+```yaml
+  actions:
+    - actions/timesCar/deploy.py --dest /usr/local/nginx/html/timescar
+```
+
+- **拷整个 `web/` 目录**而不是只拷 `index.html`——页面用相对路径引用 `car/*.png` 和 `logos/*`。
+- 已存在则**覆盖**；加 `--clean` 会先清空目标目录（保证完全同步，删掉旧文件）。
+- 目标目录取值：`--dest` > 环境变量 `TIMESCAR_DEPLOY_DIR` > 脚本内的 `DEFAULT_DEST`。
+- 会自动把文件权限设成 `644`、目录 `755`，确保 nginx 用户可读。
+- **非服务器环境自动跳过**：目标目录的父目录不存在时（比如本地开发机没有 nginx），
+  只打印 `[跳过]` 并退出 0，不会让整条链路失败。想改成严格报错加 `--strict`。
+
+数据优先级与关联方式：
+
+- **返却証邮件**（実績：利用時間 / 走行距離 / 合計金額 + 最高速度 / 急加速 / 急減速）
+  > **CSV**（実績兜底）> **予約完了邮件**（仅预约信息）
+- 返却証与预约邮件都含 `予約番号`，直接按键关联；**CSV 没有该列**，用「预约开始时间 + ステーション」关联
+- 只要有実績就收录；同一 `予約番号` 按邮件时间升序处理、后覆盖前（使「予約変更完了」覆盖「予約登録完了」）
+
+使用：
+
+```bash
+# 完整链路（推荐）：拉邮件 -> 解析合并 -> 生成看板
+python run_tasks.py
+
+# 只用既有数据重新生成看板
+python actions/timesCar/parse_mail.py && python actions/timesCar/build_web.py
+```
+
+- **补 CSV**（覆盖邮件缺失的月份）：官网导出利用明细放进 `actions/timesCar/site/`，
+  文件名任意、`.csv` 结尾、**Shift-JIS(cp932) 编码**，脚本只取 `項目名 == 利用料金` 的行。
+- **既有 `.eml` 照常利用**：`mail/` 里手动下载的老文件会继续参与解析（按 `予約番号` 去重，
+  不会重复计数），IMAP 拉下来的以 UID 命名，两者共存无冲突。
+
+> 已知小瑕疵：某条记录改用「返却証」取実績后，它对应的 CSV 行不会被消费，
+> 会留在 `formMail.md` 末尾的「仅 CSV 存在」清单里——**不影响主表数据**，只是清单偏多。
 
 ## 7. 日志
 
